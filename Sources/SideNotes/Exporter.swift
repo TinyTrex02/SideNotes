@@ -22,7 +22,9 @@ enum Exporter {
         let ns = s.string as NSString
         s.enumerateAttributes(in: NSRange(location: 0, length: s.length)) { attrs, r, _ in
             if let a = attrs[.attachment] as? NSTextAttachment {
-                if let img = ImageUtil.htmlData(a) {
+                if DividerUtil.isDivider(a) {
+                    html += "<hr>"
+                } else if let img = ImageUtil.htmlData(a) {
                     html += "<img src=\"data:\(img.1);base64,\(img.0.base64EncodedString())\" width=\"\(Int(ImageUtil.width(a)))\" style=\"max-width:100%;height:auto\">"
                 }
                 return
@@ -32,6 +34,10 @@ enum Exporter {
             if TextStyle.has(.italic, attrs) { t = "<i>\(t)</i>" }
             if TextStyle.has(.underline, attrs) { t = "<u>\(t)</u>" }
             if TextStyle.has(.strike, attrs) { t = "<s>\(t)</s>" }
+            if let font = attrs[.font] as? NSFont {
+                let size = TextSize.closest(to: font.pointSize)
+                if size != .medium { t = "<span style=\"font-size:\(Int(size.rawValue))px\">\(t)</span>" }
+            }
             if let l = attrs[.link] {
                 let href = (l as? URL)?.absoluteString ?? "\(l)"
                 t = "<a href=\"\(escape(href))\">\(t)</a>"

@@ -48,6 +48,9 @@ final class AppState: ObservableObject {
     @Published var selectedImageWidth: Double? = nil
     @Published var maxImageWidth: Double = 340
     @Published var status: String? = nil
+    @Published var activeFormats = Set<Format>()
+    @Published var activeTextSize: TextSize = .medium
+    @Published var isCollapsed = false
 
     var hide: () -> Void = {}          // set by AppDelegate
     let editor = EditorController()
@@ -90,6 +93,16 @@ final class AppState: ObservableObject {
     }
 
     var index: Int? { notes.firstIndex { $0.id == selectedID } }
+
+    var currentCounts: (words: Int, characters: Int) {
+        guard let i = index else { return (0, 0) }
+        let text = notes[i].plain
+        var words = 0
+        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { _, _, _, _ in
+            words += 1
+        }
+        return (words, text.count)
+    }
 
     // MARK: Documents
 

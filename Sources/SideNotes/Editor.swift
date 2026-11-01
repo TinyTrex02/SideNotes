@@ -11,12 +11,32 @@ extension NSAttributedString.Key {
     static let snImageDone = NSAttributedString.Key("SideNotesImageDone")
 }
 
-enum Format { case bold, italic, underline, strike }
+enum Format: Hashable { case bold, italic, underline, strike }
+
+enum TextSize: CGFloat, CaseIterable, Identifiable {
+    case normal = 12
+    case medium = 14
+    case large = 18
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .normal: return "Normal"
+        case .medium: return "Medium"
+        case .large: return "Large"
+        }
+    }
+
+    static func closest(to points: CGFloat) -> TextSize {
+        allCases.min { abs($0.rawValue - points) < abs($1.rawValue - points) } ?? .medium
+    }
+}
 
 // MARK: - Text style
 
 enum TextStyle {
-    static let baseSize: CGFloat = 14
+    static let baseSize = TextSize.medium.rawValue
     static var baseFont: NSFont { .systemFont(ofSize: baseSize) }
     static var defaultAttributes: [NSAttributedString.Key: Any] {
         [.font: baseFont, .foregroundColor: NSColor.textColor]
@@ -44,7 +64,7 @@ enum TextStyle {
         s.enumerateAttributes(in: NSRange(location: 0, length: s.length)) { attrs, r, _ in
             if let f = attrs[.font] as? NSFont {
                 let t = f.fontDescriptor.symbolicTraits
-                var nf = baseFont
+                var nf = NSFont.systemFont(ofSize: TextSize.closest(to: f.pointSize).rawValue)
                 if t.contains(.bold) { nf = font(nf, .bold, true) }
                 if t.contains(.italic) { nf = font(nf, .italic, true) }
                 out.addAttribute(.font, value: nf, range: r)
@@ -55,6 +75,61 @@ enum TextStyle {
             if let a = attrs[.attachment] { out.addAttribute(.attachment, value: a, range: r) }
         }
         return out
+    }
+}
+
+// MARK: - Dividers and smart links
+
+enum DividerUtil {
+    private static let filename = "sidenotes-horizontal-divider.sndivider"
+
+    static func isDivider(_ attachment: NSTextAttachment) -> Bool {
+        let name = attachment.fileWrapper?.preferredFilename ?? attachment.fileWrapper?.filename
+        return name == filename
+    }
+
+    static func make(width: CGFloat) -> NSTextAttachment {
+        let wrapper = FileWrapper(regularFileWithContents: Data("SideNotes divider".utf8))
+        wrapper.preferredFilename = filename
+        let attachment = NSTextAttachment(fileWrapper: wrapper)
+        configure(attachment, width: width)
+        return attachment
+    }
+
+    static func configure(_ attachment: NSTextAttachment, width: CGFloat) {
+        let w = max(40, width.rounded())
+        let height: CGFloat = 13
+        let image = NSImage(size: NSSize(width: w, height: height), flipped: false) { rect in
+            NSColor.separatorColor.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: rect.midY.rounded(), width: rect.width, height: 1),
+                         xRadius: 0.5, yRadius: 0.5).fill()
+            return true
+        }
+        attachment.attachmentCell = NSTextAttachmentCell(imageCell: image)
+        attachment.bounds = NSRect(x: 0, y: -3, width: w, height: height)
+    }
+}
+
+enum SmartLink {
+    static func url(from text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(where: { $0.isWhitespace }) else { return nil }
+        let hasScheme = trimmed.contains("://")
+        guard hasScheme || trimmed.contains(".") else { return nil }
+        let candidate = hasScheme ? trimmed : "https://\(trimmed)"
+        guard let url = URL(string: candidate),
+              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              url.host != nil else { return nil }
+        return url
+    }
+
+    static func title(for url: URL) -> String {
+        let host = (url.host ?? url.absoluteString).replacingOccurrences(of: "www.", with: "")
+        let parts = url.path.split(separator: "/").map(String.init)
+        guard !parts.isEmpty else { return host }
+        let tail = parts.suffix(2).joined(separator: "/").removingPercentEncoding ?? parts.last!
+        let compact = tail.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")
+        return String("\(host) › \(compact)".prefix(52))
     }
 }
 
@@ -168,7 +243,9 @@ enum NoteCodec {
     }
 
     static func encode(_ s: NSAttributedString) -> (Data?, [Double]) {
-        let widths = attachments(in: s).map { Double(ImageUtil.width($0.0)) }
+        let widths = attachments(in: s)
+            .filter { !DividerUtil.isDivider($0.0) }
+            .map { Double(ImageUtil.width($0.0)) }
         let data = s.rtfd(from: NSRange(location: 0, length: s.length),
                           documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
         return (data, widths)
@@ -178,12 +255,16 @@ enum NoteCodec {
         var raw = NSAttributedString(string: n.plain)
         if let d = n.rtfd, let s = NSAttributedString(rtfd: d, documentAttributes: nil) { raw = s }
         let s = TextStyle.sanitize(raw)
-        for (i, item) in attachments(in: s).enumerated() {
+        var imageIndex = 0
+        for item in attachments(in: s) {
             let (a, r) = item
-            if let img = ImageUtil.image(of: a) {
-                let saved = i < n.imageWidths.count ? n.imageWidths[i] : 0
+            if DividerUtil.isDivider(a) {
+                DividerUtil.configure(a, width: ImageUtil.defaultMax)
+            } else if let img = ImageUtil.image(of: a) {
+                let saved = imageIndex < n.imageWidths.count ? n.imageWidths[imageIndex] : 0
                 let w = saved > 0 ? CGFloat(saved) : min(img.size.width, ImageUtil.defaultMax)
                 ImageUtil.setWidth(a, w, base: img)
+                imageIndex += 1
             }
             s.addAttribute(.snImageDone, value: true, range: r)
         }
@@ -195,6 +276,24 @@ enum NoteCodec {
 
 final class NoteTextView: NSTextView {
     var onFormat: ((Format) -> Void)?
+    var onCompactURL: (() -> Bool)?
+    var onWidthChange: (() -> Void)?
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = abs(frame.width - newSize.width) > 1
+        super.setFrameSize(newSize)
+        if changed { DispatchQueue.main.async { [weak self] in self?.onWidthChange?() } }
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        if let text = insertString as? String,
+           text.first.map({ $0.isWhitespace }) == true,
+           onCompactURL?() == true {
+            super.insertText(insertString, replacementRange: selectedRange())
+            return
+        }
+        super.insertText(insertString, replacementRange: replacementRange)
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.firstResponder === self else { return super.performKeyEquivalent(with: event) }
@@ -234,6 +333,14 @@ final class NoteTextView: NSTextView {
             || types.contains(NSPasteboard.PasteboardType("com.apple.flat-rtfd"))
 
         if hasImage && !hasString { super.paste(sender); return }
+        if !hasRich, let raw = pb.string(forType: .string),
+           let url = SmartLink.url(from: raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            var attrs = typingAttributes
+            attrs[.link] = url
+            insertText(NSAttributedString(string: SmartLink.title(for: url), attributes: attrs),
+                       replacementRange: selectedRange())
+            return
+        }
         if hasRich,
            let attr = pb.readObjects(forClasses: [NSAttributedString.self], options: nil)?.first as? NSAttributedString,
            attr.length > 0 {
@@ -245,6 +352,31 @@ final class NoteTextView: NSTextView {
 
     // Esc hides the panel instead of triggering autocomplete
     override func cancelOperation(_ sender: Any?) { window?.cancelOperation(sender) }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 1, toggleCheckbox(at: event.locationInWindow) { return }
+        super.mouseDown(with: event)
+    }
+
+    private func toggleCheckbox(at windowPoint: NSPoint) -> Bool {
+        guard let layoutManager, let textContainer, let storage = textStorage, storage.length > 0 else { return false }
+        var point = convert(windowPoint, from: nil)
+        point.x -= textContainerOrigin.x
+        point.y -= textContainerOrigin.y
+        let glyph = layoutManager.glyphIndex(for: point, in: textContainer)
+        guard glyph < layoutManager.numberOfGlyphs else { return false }
+        let character = layoutManager.characterIndexForGlyph(at: glyph)
+        guard character < storage.length else { return false }
+        let range = NSRange(location: character, length: 1)
+        let value = (storage.string as NSString).substring(with: range)
+        guard value == "☐" || value == "☑" else { return false }
+        let glyphRect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
+        guard glyphRect.insetBy(dx: -4, dy: -3).contains(point),
+              shouldChangeText(in: range, replacementString: value == "☐" ? "☑" : "☐") else { return false }
+        storage.replaceCharacters(in: range, with: value == "☐" ? "☑" : "☐")
+        didChangeText()
+        return true
+    }
 }
 
 // MARK: - Editor controller
@@ -288,6 +420,8 @@ final class EditorController: NSObject, NSTextViewDelegate {
         super.init()
         tv.delegate = self
         tv.onFormat = { [weak self] f in self?.apply(f) }
+        tv.onCompactURL = { [weak self] in self?.compactURLBeforeCursor() ?? false }
+        tv.onWidthChange = { [weak self] in self?.resizeDividers() }
     }
 
     private var storage: NSTextStorage { textView.textStorage! }
@@ -309,7 +443,9 @@ final class EditorController: NSObject, NSTextViewDelegate {
         textView.undoManager?.removeAllActions()
         textView.setSelectedRange(NSRange(location: 0, length: 0))
         textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+        resizeDividers()
         refreshImageSelection()
+        refreshFormattingState()
     }
 
     // MARK: Delegate
@@ -317,10 +453,19 @@ final class EditorController: NSObject, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         normalizeNewImages()
         push()
+        refreshFormattingState()
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
         refreshImageSelection()
+        refreshFormattingState()
+    }
+
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        let url = (link as? URL) ?? URL(string: "\(link)")
+        guard let url else { return false }
+        NSWorkspace.shared.open(url)
+        return true
     }
 
     private func push() {
@@ -336,7 +481,10 @@ final class EditorController: NSObject, NSTextViewDelegate {
         guard !pending.isEmpty else { return }
         storage.beginEditing()
         for (a, r) in pending {
-            if let img = ImageUtil.image(of: a) {
+            if DividerUtil.isDivider(a) {
+                DividerUtil.configure(a, width: maxImageWidth)
+                storage.addAttribute(.attachment, value: a, range: r)
+            } else if let img = ImageUtil.image(of: a) {
                 if let fw = ImageUtil.storableWrapper(for: a, image: img) { a.fileWrapper = fw }
                 ImageUtil.setWidth(a, min(img.size.width, maxImageWidth), base: img)
                 storage.addAttribute(.attachment, value: a, range: r)
@@ -363,6 +511,7 @@ final class EditorController: NSObject, NSTextViewDelegate {
                 else { attrs[key] = NSUnderlineStyle.single.rawValue }
             }
             textView.typingAttributes = attrs
+            refreshFormattingState()
             return
         }
 
@@ -387,6 +536,62 @@ final class EditorController: NSObject, NSTextViewDelegate {
         }
         storage.endEditing()
         textView.didChangeText()
+        refreshFormattingState()
+    }
+
+    func applySize(_ size: TextSize) {
+        let range = textView.selectedRange()
+        if range.length == 0 {
+            var attrs = textView.typingAttributes
+            let font = (attrs[.font] as? NSFont) ?? TextStyle.baseFont
+            attrs[.font] = NSFont(descriptor: font.fontDescriptor, size: size.rawValue)
+                ?? NSFont.systemFont(ofSize: size.rawValue)
+            textView.typingAttributes = attrs
+            refreshFormattingState()
+            return
+        }
+
+        guard textView.shouldChangeText(in: range, replacementString: nil) else { return }
+        storage.beginEditing()
+        storage.enumerateAttribute(.font, in: range) { value, subrange, _ in
+            let font = (value as? NSFont) ?? TextStyle.baseFont
+            let resized = NSFont(descriptor: font.fontDescriptor, size: size.rawValue)
+                ?? NSFont.systemFont(ofSize: size.rawValue)
+            storage.addAttribute(.font, value: resized, range: subrange)
+        }
+        storage.endEditing()
+        textView.didChangeText()
+        refreshFormattingState()
+    }
+
+    private func refreshFormattingState() {
+        let selection = textView.selectedRange()
+        var formats = Set<Format>()
+        var size = TextSize.medium
+
+        if selection.length == 0 {
+            let attrs = textView.typingAttributes
+            for format in [Format.bold, .italic, .underline, .strike] where TextStyle.has(format, attrs) {
+                formats.insert(format)
+            }
+            if let font = attrs[.font] as? NSFont { size = .closest(to: font.pointSize) }
+        } else if selection.location + selection.length <= storage.length {
+            for format in [Format.bold, .italic, .underline, .strike] {
+                var allOn = true
+                storage.enumerateAttributes(in: selection) { attrs, _, stop in
+                    if !TextStyle.has(format, attrs) { allOn = false; stop.pointee = true }
+                }
+                if allOn { formats.insert(format) }
+            }
+            if let font = storage.attribute(.font, at: selection.location, effectiveRange: nil) as? NSFont {
+                size = .closest(to: font.pointSize)
+            }
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.state?.activeFormats = formats
+            self?.state?.activeTextSize = size
+        }
     }
 
     // MARK: Images
@@ -425,7 +630,9 @@ final class EditorController: NSObject, NSTextViewDelegate {
         var out: [(NSTextAttachment, NSRange, NSImage)] = []
         for range in ranges where range.location + range.length <= storage.length {
             storage.enumerateAttribute(.attachment, in: range) { v, r, _ in
-                if let a = v as? NSTextAttachment, let img = ImageUtil.image(of: a) { out.append((a, r, img)) }
+                if let a = v as? NSTextAttachment, !DividerUtil.isDivider(a), let img = ImageUtil.image(of: a) {
+                    out.append((a, r, img))
+                }
             }
             if sel.length == 0 && !out.isEmpty { break }
         }
@@ -454,6 +661,16 @@ final class EditorController: NSObject, NSTextViewDelegate {
         }
     }
 
+    func resizeDividers() {
+        guard storage.length > 0 else { return }
+        storage.beginEditing()
+        for (attachment, range) in NoteCodec.attachments(in: storage) where DividerUtil.isDivider(attachment) {
+            DividerUtil.configure(attachment, width: maxImageWidth)
+            storage.addAttribute(.attachment, value: attachment, range: range)
+        }
+        storage.endEditing()
+    }
+
     // MARK: Misc
 
     func highlight(_ q: String) {
@@ -475,6 +692,50 @@ final class EditorController: NSObject, NSTextViewDelegate {
         let text = (atLineStart ? "" : "\n") + "[\(f.string(from: Date()))] "
         focus()
         textView.insertText(text, replacementRange: sel)
+    }
+
+    func insertDivider() {
+        focus()
+        let selection = textView.selectedRange()
+        let ns = storage.string as NSString
+        let atLineStart = selection.location == 0 || ns.character(at: selection.location - 1) == 10
+        let output = NSMutableAttributedString()
+        if !atLineStart { output.append(NSAttributedString(string: "\n", attributes: textView.typingAttributes)) }
+        output.append(NSAttributedString(attachment: DividerUtil.make(width: maxImageWidth)))
+        output.append(NSAttributedString(string: "\n", attributes: textView.typingAttributes))
+        textView.insertText(output, replacementRange: selection)
+    }
+
+    func insertCheckbox() {
+        focus()
+        let selection = textView.selectedRange()
+        let ns = storage.string as NSString
+        let atLineStart = selection.location == 0 || ns.character(at: selection.location - 1) == 10
+        let prefix = atLineStart ? "" : "\n"
+        textView.insertText(prefix + "☐ ", replacementRange: selection)
+    }
+
+    @discardableResult
+    private func compactURLBeforeCursor() -> Bool {
+        let selection = textView.selectedRange()
+        guard selection.length == 0, selection.location > 0 else { return false }
+        let ns = storage.string as NSString
+        var start = selection.location
+        while start > 0 {
+            let scalar = UnicodeScalar(ns.character(at: start - 1))
+            if scalar.map({ CharacterSet.whitespacesAndNewlines.contains($0) }) == true { break }
+            start -= 1
+        }
+        let range = NSRange(location: start, length: selection.location - start)
+        guard range.length > 0, let url = SmartLink.url(from: ns.substring(with: range)) else { return false }
+        var attrs = storage.attributes(at: start, effectiveRange: nil)
+        attrs[.link] = url
+        let replacement = NSAttributedString(string: SmartLink.title(for: url), attributes: attrs)
+        guard textView.shouldChangeText(in: range, replacementString: replacement.string) else { return false }
+        storage.replaceCharacters(in: range, with: replacement)
+        textView.didChangeText()
+        textView.setSelectedRange(NSRange(location: start + replacement.length, length: 0))
+        return true
     }
 
     func copyCurrentNote() {

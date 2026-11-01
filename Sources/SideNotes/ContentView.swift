@@ -8,6 +8,18 @@ struct ContentView: View {
     private var searching: Bool { !state.query.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
+        Group {
+            if state.isCollapsed {
+                CollapsedDotView { state.isCollapsed = false }
+            } else {
+                expandedPanel
+            }
+        }
+        .animation(.snappy(duration: 0.28), value: state.isCollapsed)
+        .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
+    }
+
+    private var expandedPanel: some View {
         VStack(spacing: 0) {
             header
             Divider()
@@ -21,7 +33,6 @@ struct ContentView: View {
             footer
         }
         .background(.regularMaterial)
-        .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
     }
 
     // MARK: Header
@@ -44,6 +55,10 @@ struct ContentView: View {
 
                 Button { state.newNote() } label: { Image(systemName: "plus") }
                     .help("New note")
+                Button { state.isCollapsed = true } label: {
+                    Image(systemName: "circle.dotted.circle")
+                }
+                .help("Collapse to floating dot")
                 Button { state.pinned.toggle() } label: {
                     Image(systemName: state.pinned ? "pin.fill" : "pin.slash")
                 }
@@ -79,10 +94,33 @@ struct ContentView: View {
     // MARK: Formatting bar
     private var formatBar: some View {
         HStack(spacing: 2) {
-            fmt("bold", .bold, "Bold (⌘B)")
-            fmt("italic", .italic, "Italic (⌘I)")
-            fmt("underline", .underline, "Underline (⌘U)")
-            fmt("strikethrough", .strike, "Strikethrough (⇧⌘X)")
+            fmt(.bold, "Bold (⌘B)")
+            fmt(.italic, "Italic (⌘I)")
+            fmt(.underline, "Underline (⌘U)")
+            fmt(.strike, "Strikethrough (⇧⌘X)")
+
+            Divider().frame(height: 16).padding(.horizontal, 4)
+
+            Menu {
+                ForEach(TextSize.allCases) { size in
+                    Button {
+                        state.editor.applySize(size)
+                        state.editor.focus()
+                    } label: {
+                        if state.activeTextSize == size { Image(systemName: "checkmark") }
+                        Text(size.title)
+                    }
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Text("Aa").fontWeight(.medium)
+                    Text(state.activeTextSize.title).font(.caption)
+                }
+                .frame(height: 20)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Text size")
 
             Divider().frame(height: 16).padding(.horizontal, 4)
 
@@ -90,6 +128,16 @@ struct ContentView: View {
                 Image(systemName: "photo").frame(width: 24, height: 20)
             }
             .help("Insert image. You can also paste or drag one in. Click an image to resize it.")
+
+            Button { state.editor.insertDivider() } label: {
+                Image(systemName: "minus").frame(width: 24, height: 20)
+            }
+            .help("Insert horizontal separator")
+
+            Button { state.editor.insertCheckbox() } label: {
+                Image(systemName: "checklist").frame(width: 24, height: 20)
+            }
+            .help("Insert clickable checkbox")
 
             if let w = state.selectedImageWidth {
                 Image(systemName: "arrow.left.and.right")
@@ -109,14 +157,30 @@ struct ContentView: View {
         .padding(.vertical, 5)
     }
 
-    private func fmt(_ icon: String, _ f: Format, _ help: String) -> some View {
+    private func fmt(_ format: Format, _ help: String) -> some View {
         Button {
-            state.editor.apply(f)
+            state.editor.apply(format)
             state.editor.focus()
         } label: {
-            Image(systemName: icon).frame(width: 24, height: 20)
+            formatLabel(format)
+                .frame(width: 24, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(state.activeFormats.contains(format) ? Color.accentColor.opacity(0.22) : .clear)
+                )
         }
         .help(help)
+        .accessibilityValue(state.activeFormats.contains(format) ? "On" : "Off")
+    }
+
+    @ViewBuilder
+    private func formatLabel(_ format: Format) -> some View {
+        switch format {
+        case .bold: Text("B").bold()
+        case .italic: Text("I").italic()
+        case .underline: Text("U").underline()
+        case .strike: Text("S").strikethrough()
+        }
     }
 
     // MARK: Search results
@@ -167,7 +231,8 @@ struct ContentView: View {
 
     // MARK: Footer
     private var footer: some View {
-        HStack(spacing: 10) {
+        let counts = state.currentCounts
+        return HStack(spacing: 10) {
             Button { state.editor.insertTimestamp() } label: { Label("Time", systemImage: "clock") }
                 .help("Insert current time")
 
@@ -192,6 +257,12 @@ struct ContentView: View {
                 .help("Delete note")
 
             Spacer()
+
+            Text("\(counts.words) words · \(counts.characters) chars")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .fixedSize()
 
             if let s = state.status {
                 Text(s)
@@ -221,5 +292,41 @@ struct ContentView: View {
                 state.scheduleSave()
             }
         )
+    }
+}
+
+private struct CollapsedDotView: View {
+    let expand: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: expand) {
+            ZStack {
+                Circle()
+                    .fill(.regularMaterial)
+                    .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
+                Circle()
+                    .stroke(Color.accentColor.opacity(hovering ? 0.9 : 0.55), lineWidth: 2)
+                    .padding(4)
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: hovering ? 13 : 10, height: hovering ? 13 : 10)
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.72))
+                        .frame(width: 4, height: 4)
+                        .offset(y: -15)
+                        .rotationEffect(.degrees(Double(index) * 120 + (hovering ? 60 : 0)))
+                }
+            }
+            .padding(3)
+            .contentShape(Circle())
+            .scaleEffect(hovering ? 1.06 : 1)
+        }
+        .buttonStyle(.plain)
+        .help("Open SideNotes")
+        .onHover { hovering = $0 }
+        .animation(.spring(response: 0.28, dampingFraction: 0.68), value: hovering)
+        .padding(3)
     }
 }
