@@ -4,6 +4,7 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject var state: AppState
     @FocusState private var searchFocused: Bool
+    @State private var browser: NoteBrowserMode?
 
     private var searching: Bool { !state.query.trimmingCharacters(in: .whitespaces).isEmpty }
 
@@ -16,23 +17,34 @@ struct ContentView: View {
             }
         }
         .animation(.snappy(duration: 0.28), value: state.isCollapsed)
+        .preferredColorScheme(state.appearanceMode == .dark ? .dark : nil)
+        .sheet(item: $browser) { mode in
+            NoteBrowserView(mode: mode)
+                .environmentObject(state)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
     }
 
     private var expandedPanel: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            panelDivider
             formatBar
-            Divider()
+            panelDivider
             ZStack {
                 RichEditor(controller: state.editor, noteID: state.selectedID)
                 if searching { results }
             }
-            Divider()
+            panelDivider
             footer
         }
-        .background(.regularMaterial)
+        .background {
+            if state.appearanceMode == .dark {
+                Color.black
+            } else {
+                Rectangle().fill(.regularMaterial)
+            }
+        }
     }
 
     // MARK: Header
@@ -40,14 +52,29 @@ struct ContentView: View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
                 Menu {
+                    Button {
+                        browser = .all
+                    } label: {
+                        Label("View All", systemImage: "square.grid.2x2")
+                    }
+                    Divider()
                     ForEach(state.notes) { n in
                         Button(n.title.isEmpty ? "Untitled" : n.title) { state.selectedID = n.id }
                     }
+                    Divider()
+                    Button {
+                        browser = .deleted
+                    } label: {
+                        Label("Recently Deleted", systemImage: "trash")
+                    }
                 } label: {
-                    Image(systemName: "note.text")
+                    HStack(spacing: 2) {
+                        Image(systemName: "note.text")
+                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                    }
                 }
                 .menuStyle(.borderlessButton)
-                .frame(width: 28)
+                .frame(width: 34)
 
                 TextField("Title (e.g. Lex Fridman #412)", text: titleBinding)
                     .textFieldStyle(.plain)
@@ -55,6 +82,12 @@ struct ContentView: View {
 
                 Button { state.newNote() } label: { Image(systemName: "plus") }
                     .help("New note")
+                Button {
+                    state.appearanceMode = state.appearanceMode == .grey ? .dark : .grey
+                } label: {
+                    Image(systemName: state.appearanceMode.icon)
+                }
+                .help(state.appearanceMode == .grey ? "Switch to matte-black dark mode" : "Switch to translucent grey mode")
                 Button { state.isCollapsed = true } label: {
                     Image(systemName: "circle.dotted.circle")
                 }
@@ -87,7 +120,6 @@ struct ContentView: View {
             .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
         }
         .padding(.horizontal, 12)
-        .padding(.top, 28)      // room for the transparent titlebar
         .padding(.bottom, 8)
     }
 
@@ -99,7 +131,7 @@ struct ContentView: View {
             fmt(.underline, "Underline (⌘U)")
             fmt(.strike, "Strikethrough (⇧⌘X)")
 
-            Divider().frame(height: 16).padding(.horizontal, 4)
+            toolbarDivider
 
             Menu {
                 ForEach(TextSize.allCases) { size in
@@ -122,7 +154,7 @@ struct ContentView: View {
             .fixedSize()
             .help("Text size")
 
-            Divider().frame(height: 16).padding(.horizontal, 4)
+            toolbarDivider
 
             Button { state.editor.insertImagesFromDisk() } label: {
                 Image(systemName: "photo").frame(width: 24, height: 20)
@@ -173,6 +205,13 @@ struct ContentView: View {
         .accessibilityValue(state.activeFormats.contains(format) ? "On" : "Off")
     }
 
+    private var toolbarDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(state.appearanceMode == .dark ? 0.38 : 0.58))
+            .frame(width: 1, height: 16)
+            .padding(.horizontal, 4)
+    }
+
     @ViewBuilder
     private func formatLabel(_ format: Format) -> some View {
         switch format {
@@ -215,7 +254,7 @@ struct ContentView: View {
                 }
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(state.appearanceMode == .dark ? Color.black : Color(nsColor: .windowBackgroundColor))
     }
 
     private func snippet(_ text: String, _ q: String) -> String {
@@ -231,38 +270,40 @@ struct ContentView: View {
 
     // MARK: Footer
     private var footer: some View {
+        ViewThatFits(in: .horizontal) {
+            footerRow(showCounts: true, opacityWidth: 70)
+            footerRow(showCounts: false, opacityWidth: 48)
+        }
+        .buttonStyle(.borderless)
+        .font(.callout)
+        .padding(10)
+    }
+
+    private func footerRow(showCounts: Bool, opacityWidth: CGFloat) -> some View {
         let counts = state.currentCounts
-        return HStack(spacing: 10) {
-            Button { state.editor.insertTimestamp() } label: { Label("Time", systemImage: "clock") }
-                .help("Insert current time")
-
-            Menu {
-                Button("Copy This Note") {
-                    state.editor.copyCurrentNote()
-                    state.flash("Copied")
-                }
-                Divider()
-                Button("Send All to Apple Notes") { state.sendAllToAppleNotes() }
-                Button("Email All Notes…") { state.emailAllNotes() }
-                Divider()
-                Button("Back Up Now") { state.backupNow() }
-                Button("Show Backups in Finder") { state.showBackups() }
-            } label: {
-                Label("Share", systemImage: "square.and.arrow.up")
+        return HStack(spacing: 12) {
+            Button { state.editor.insertTimestamp() } label: {
+                Image(systemName: "clock").frame(width: 22, height: 20)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
+            .help("Insert current time")
+            .accessibilityLabel("Insert current time")
 
-            Button(role: .destructive) { state.deleteCurrent() } label: { Image(systemName: "trash") }
-                .help("Delete note")
+            shareMenu
 
-            Spacer()
+            Button(role: .destructive) { state.deleteCurrent() } label: {
+                Image(systemName: "trash").frame(width: 22, height: 20)
+            }
+            .help("Move note to Recently Deleted")
 
-            Text("\(counts.words) words · \(counts.characters) chars")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .fixedSize()
+            Spacer(minLength: 6)
+
+            if showCounts {
+                Text("\(counts.words) words · \(counts.characters) chars")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
 
             if let s = state.status {
                 Text(s)
@@ -270,15 +311,41 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-            } else {
+            } else if state.appearanceMode == .grey {
                 Image(systemName: "circle.lefthalf.filled").foregroundStyle(.secondary)
-                Slider(value: $state.opacity, in: 0.3...1.0).frame(width: 70)
-                    .help("Opacity")
+                Slider(value: $state.opacity, in: 0.3...1.0)
+                    .frame(width: opacityWidth)
+                    .help("Grey mode opacity")
             }
         }
-        .buttonStyle(.borderless)
-        .font(.callout)
-        .padding(10)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var shareMenu: some View {
+        Menu {
+            Button("Copy This Note") {
+                state.editor.copyCurrentNote()
+                state.flash("Copied")
+            }
+            Divider()
+            Button("Send All to Apple Notes") { state.sendAllToAppleNotes() }
+            Button("Email All Notes…") { state.emailAllNotes() }
+            Divider()
+            Button("Back Up Now") { state.backupNow() }
+            Button("Show Backups in Finder") { state.showBackups() }
+        } label: {
+            Image(systemName: "square.and.arrow.up").frame(width: 22, height: 20)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Share and back up")
+        .accessibilityLabel("Share and back up")
+    }
+
+    private var panelDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(state.appearanceMode == .dark ? 0.34 : 0.52))
+            .frame(height: 1)
     }
 
     // MARK: Helpers
@@ -295,16 +362,153 @@ struct ContentView: View {
     }
 }
 
+private enum NoteBrowserMode: String, Identifiable {
+    case all
+    case deleted
+
+    var id: String { rawValue }
+}
+
+private struct NoteBrowserView: View {
+    @EnvironmentObject var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    let mode: NoteBrowserMode
+
+    private let columns = [GridItem(.adaptive(minimum: 155, maximum: 205), spacing: 16)]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(mode == .all ? "All Notes" : "Recently Deleted")
+                    .font(.title2.bold())
+                Spacer()
+                if mode == .deleted && !state.deletedNotes.isEmpty {
+                    Text("\(state.deletedNotes.count) item\(state.deletedNotes.count == 1 ? "" : "s")")
+                        .foregroundStyle(.secondary)
+                }
+                Button { dismiss() } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.borderless)
+                    .font(.title3)
+                    .help("Close")
+            }
+            .padding(18)
+
+            Divider()
+
+            ScrollView {
+                if mode == .deleted && state.deletedNotes.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "trash").font(.system(size: 32))
+                        Text("Recently Deleted is empty").font(.headline)
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 260)
+                } else {
+                    LazyVGrid(columns: columns, spacing: 16) {
+                        if mode == .all {
+                            ForEach(state.notes) { note in allNoteCard(note) }
+                        } else {
+                            ForEach(state.deletedNotes) { item in deletedNoteCard(item) }
+                        }
+                    }
+                    .padding(18)
+                }
+            }
+        }
+        .frame(minWidth: 560, idealWidth: 700, minHeight: 390, idealHeight: 500)
+        .background(state.appearanceMode == .dark ? Color.black : Color(nsColor: .windowBackgroundColor))
+        .preferredColorScheme(state.appearanceMode == .dark ? .dark : nil)
+    }
+
+    private func allNoteCard(_ note: Note) -> some View {
+        Button {
+            state.selectedID = note.id
+            dismiss()
+            DispatchQueue.main.async { state.editor.focus() }
+        } label: {
+            noteCard(note)
+        }
+        .buttonStyle(.plain)
+        .help("Open \(displayTitle(note))")
+    }
+
+    private func deletedNoteCard(_ item: DeletedNote) -> some View {
+        VStack(spacing: 8) {
+            noteCard(item.note)
+            HStack {
+                Button("Restore") {
+                    state.restoreDeleted(item.id)
+                    dismiss()
+                }
+                Spacer()
+                Button(role: .destructive) {
+                    state.permanentlyDelete(item.id)
+                } label: {
+                    Image(systemName: "trash.slash")
+                }
+                .help("Delete permanently")
+            }
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 4)
+        }
+    }
+
+    private func noteCard(_ note: Note) -> some View {
+        VStack(spacing: 0) {
+            Text(preview(note))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(6)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(12)
+
+            Rectangle().fill(Color.white.opacity(0.3)).frame(height: 1)
+
+            Text(displayTitle(note))
+                .font(.headline)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+        }
+        .frame(height: 160)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(state.appearanceMode == .dark ? Color.white.opacity(0.08) : Color.primary.opacity(0.065))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.white.opacity(state.appearanceMode == .dark ? 0.22 : 0.45), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func displayTitle(_ note: Note) -> String {
+        note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled" : note.title
+    }
+
+    private func preview(_ note: Note) -> String {
+        let text = note.plain.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "No text" : text
+    }
+}
+
 private struct CollapsedDotView: View {
+    @EnvironmentObject var state: AppState
     let expand: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: expand) {
             ZStack {
-                Circle()
-                    .fill(.regularMaterial)
-                    .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
+                Group {
+                    if state.appearanceMode == .dark {
+                        Circle().fill(Color.black)
+                    } else {
+                        Circle().fill(.regularMaterial)
+                    }
+                }
+                .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
                 Circle()
                     .stroke(Color.accentColor.opacity(hovering ? 0.9 : 0.55), lineWidth: 2)
                     .padding(4)

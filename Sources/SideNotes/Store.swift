@@ -39,8 +39,25 @@ struct Note: Identifiable, Codable {
     }
 }
 
+struct DeletedNote: Identifiable, Codable {
+    var note: Note
+    var deletedAt = Date()
+
+    var id: UUID { note.id }
+}
+
+enum AppearanceMode: String, CaseIterable {
+    case grey
+    case dark
+
+    var title: String { self == .grey ? "Grey mode" : "Dark mode" }
+    // The button shows the mode it will switch to.
+    var icon: String { self == .grey ? "moon.fill" : "sun.max.fill" }
+}
+
 final class AppState: ObservableObject {
     @Published var notes: [Note] = []
+    @Published var deletedNotes: [DeletedNote] = []
     @Published var selectedID: UUID?
     @Published var pinned = true       // true = stays on top even when you click elsewhere
     @Published var opacity = 1.0
@@ -51,6 +68,9 @@ final class AppState: ObservableObject {
     @Published var activeFormats = Set<Format>()
     @Published var activeTextSize: TextSize = .medium
     @Published var isCollapsed = false
+    @Published var appearanceMode: AppearanceMode {
+        didSet { UserDefaults.standard.set(appearanceMode.rawValue, forKey: "appearanceMode") }
+    }
 
     var hide: () -> Void = {}          // set by AppDelegate
     let editor = EditorController()
@@ -62,14 +82,19 @@ final class AppState: ObservableObject {
 
     let dir: URL
     let url: URL
+    let deletedURL: URL
     var backupsDir: URL { dir.appendingPathComponent("Backups", isDirectory: true) }
 
     init() {
+        appearanceMode = AppearanceMode(
+            rawValue: UserDefaults.standard.string(forKey: "appearanceMode") ?? ""
+        ) ?? .grey
         let fm = FileManager.default
         dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("SideNotes", isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         url = dir.appendingPathComponent("notes.json")
+        deletedURL = dir.appendingPathComponent("recently-deleted.json")
 
         if fm.fileExists(atPath: url.path) {
             if let data = try? Data(contentsOf: url),
@@ -86,6 +111,10 @@ final class AppState: ObservableObject {
                 let bad = dir.appendingPathComponent("notes-unreadable-\(Int(Date().timeIntervalSince1970)).json")
                 try? fm.copyItem(at: url, to: bad)
             }
+        }
+        if let data = try? Data(contentsOf: deletedURL),
+           let saved = try? JSONDecoder().decode([DeletedNote].self, from: data) {
+            deletedNotes = saved
         }
         if notes.isEmpty { notes = [Note()] }
         selectedID = notes.first?.id
@@ -135,11 +164,32 @@ final class AppState: ObservableObject {
     func deleteCurrent() {
         guard let i = index else { return }
         let id = notes[i].id
+        if let doc = live[id] {
+            let (data, widths) = NoteCodec.encode(doc)
+            notes[i].rtfd = data
+            notes[i].imageWidths = widths
+            dirty.remove(id)
+        }
+        deletedNotes.insert(DeletedNote(note: notes[i]), at: 0)
         notes.remove(at: i)
         live[id] = nil
         dirty.remove(id)
         if notes.isEmpty { notes = [Note()] }
         selectedID = notes.first?.id
+        scheduleSave()
+    }
+
+    func restoreDeleted(_ id: UUID) {
+        guard let i = deletedNotes.firstIndex(where: { $0.id == id }) else { return }
+        let restored = deletedNotes.remove(at: i).note
+        notes.insert(restored, at: 0)
+        selectedID = restored.id
+        scheduleSave()
+        DispatchQueue.main.async { self.editor.focus() }
+    }
+
+    func permanentlyDelete(_ id: UUID) {
+        deletedNotes.removeAll { $0.id == id }
         scheduleSave()
     }
 
@@ -165,6 +215,9 @@ final class AppState: ObservableObject {
         dirty.removeAll()
         if let data = try? JSONEncoder().encode(notes) {
             try? data.write(to: url, options: .atomic)
+        }
+        if let data = try? JSONEncoder().encode(deletedNotes) {
+            try? data.write(to: deletedURL, options: .atomic)
         }
         autoBackupIfDue()
     }

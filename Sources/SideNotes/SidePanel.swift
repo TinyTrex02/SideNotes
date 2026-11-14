@@ -39,7 +39,12 @@ final class SidePanel: NSPanel {
             self?.pinned = p
             self?.level = p ? .floating : .normal
         }.store(in: &bag)
-        state.$opacity.sink { [weak self] o in self?.alphaValue = CGFloat(o) }.store(in: &bag)
+        state.$opacity
+            .combineLatest(state.$appearanceMode)
+            .sink { [weak self] opacity, mode in
+                self?.alphaValue = mode == .dark ? 1 : CGFloat(opacity)
+            }
+            .store(in: &bag)
         state.$isCollapsed
             .removeDuplicates()
             .dropFirst()

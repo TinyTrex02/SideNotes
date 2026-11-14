@@ -100,7 +100,7 @@ enum DividerUtil {
         let w = max(40, width.rounded())
         let height: CGFloat = 13
         let image = NSImage(size: NSSize(width: w, height: height), flipped: false) { rect in
-            NSColor.separatorColor.setFill()
+            NSColor.white.withAlphaComponent(0.88).setFill()
             NSBezierPath(roundedRect: NSRect(x: 0, y: rect.midY.rounded(), width: rect.width, height: 1),
                          xRadius: 0.5, yRadius: 0.5).fill()
             return true
