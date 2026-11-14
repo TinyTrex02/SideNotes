@@ -120,6 +120,7 @@ struct ContentView: View {
             .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
         }
         .padding(.horizontal, 12)
+        .padding(.top, 8)
         .padding(.bottom, 8)
     }
 
